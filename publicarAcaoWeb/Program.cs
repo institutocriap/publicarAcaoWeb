@@ -4,7 +4,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
-namespace NotificacaoAcoesConfirmadasFormandos
+namespace PublicarAcaoWeb
 {
     static class Program
     {

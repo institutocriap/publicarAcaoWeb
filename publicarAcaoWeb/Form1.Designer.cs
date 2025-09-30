@@ -1,4 +1,4 @@
-﻿namespace NotificacaoAcoesConfirmadasFormandos
+﻿namespace PublicarAcaoWeb
 {
     partial class Form1
     {

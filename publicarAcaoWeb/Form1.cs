@@ -8,14 +8,14 @@ using System.Net;
 using System.Text;
 using System.Reflection;
 using System.Linq;
-using NotificacaoAcoesConfirmadasFormandos.Properties;
-using NotificacaoAcoesConfirmadasFormandos.Connects;
+using PublicarAcaoWeb.Properties;
+using PublicarAcaoWeb.Connects;
 using System.Net.Http;
 using Newtonsoft.Json;
-using static NotificacaoAcoesConfirmadasFormandos.Model.GestorEmailConfirmadosModel;
+using static PublicarAcaoWeb.Model.GestorEmailConfirmadosModel;
 using System.Threading.Tasks;
 
-namespace NotificacaoAcoesConfirmadasFormandos
+namespace PublicarAcaoWeb
 {
     public partial class Form1 : Form
     {

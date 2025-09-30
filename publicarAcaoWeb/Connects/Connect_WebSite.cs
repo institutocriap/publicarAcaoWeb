@@ -6,7 +6,7 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
-namespace NotificacaoAcoesConfirmadasFormandos.Connects
+namespace PublicarAcaoWeb.Connects
 {
     class Connect_WebSite
     {

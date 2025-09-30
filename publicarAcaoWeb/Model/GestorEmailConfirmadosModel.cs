@@ -5,7 +5,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace NotificacaoAcoesConfirmadasFormandos.Model
+namespace PublicarAcaoWeb.Model
 {
     public class GestorEmailConfirmadosModel
     {

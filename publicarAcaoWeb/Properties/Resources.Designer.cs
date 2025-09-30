@@ -8,7 +8,7 @@
 // </auto-generated>
 //------------------------------------------------------------------------------
 
-namespace NotificacaoAcoesConfirmadasFormandos.Properties {
+namespace PublicarAcaoWeb.Properties {
     using System;
     
     
@@ -39,7 +39,7 @@ namespace NotificacaoAcoesConfirmadasFormandos.Properties {
         internal static global::System.Resources.ResourceManager ResourceManager {
             get {
                 if (object.ReferenceEquals(resourceMan, null)) {
-                    global::System.Resources.ResourceManager temp = new global::System.Resources.ResourceManager("NotificacaoAcoesConfirmadasFormandos.Properties.Resources", typeof(Resources).Assembly);
+                    global::System.Resources.ResourceManager temp = new global::System.Resources.ResourceManager("PublicarAcaoWeb.Properties.Resources", typeof(Resources).Assembly);
                     resourceMan = temp;
                 }
                 return resourceMan;

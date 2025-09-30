@@ -3,7 +3,7 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.11.35219.272
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "notificacaoAcoesConfirmadosFormandos", "notificacaoAcoesConfirmadosFormandos\notificacaoAcoesConfirmadosFormandos.csproj", "{3D007527-C5CF-4974-8276-0E6245F45318}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "publicarAcaoWeb", "publicarAcaoWeb\publicarAcaoWeb.csproj", "{3D007527-C5CF-4974-8276-0E6245F45318}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
