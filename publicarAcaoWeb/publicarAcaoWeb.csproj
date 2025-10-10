@@ -258,6 +258,7 @@
     <Compile Include="library\types\objModulos.cs" />
     <Compile Include="library\types\objSalas.cs" />
     <Compile Include="Model\GestorEmailConfirmadosModel.cs" />
+    <Compile Include="Model\PublicacaoAcaoModel.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <EmbeddedResource Include="Form1.resx">

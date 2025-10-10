@@ -12,8 +12,8 @@ using PublicarAcaoWeb.Properties;
 using PublicarAcaoWeb.Connects;
 using System.Net.Http;
 using Newtonsoft.Json;
-using static PublicarAcaoWeb.Model.GestorEmailConfirmadosModel;
 using System.Threading.Tasks;
+using PublicarAcaoWeb.Model;
 
 namespace PublicarAcaoWeb
 {
@@ -23,9 +23,12 @@ namespace PublicarAcaoWeb
         public string dataTeste;
         public string data;
         public string versao;
-        private List<Formando> alunos;
-        public static List<MoodleCourses> courses = new List<MoodleCourses>();
-        List<Relatorio> listFormandosNotificados = new List<Relatorio>();
+        private List<AcaoParaPublicacao> acoesParaProcessar;
+        List<RelatorioPublicacao> listAcoesPublicadas = new List<RelatorioPublicacao>();
+
+        // URLs das APIs
+        private const string API_PUBLICAR = "http://localhost:5141/api/publicaAcao/publicar";
+        private const string API_DESPUBLICAR = "http://localhost:5141/api/publicaAcao/despublicar";
 
         public Form1()
         {
@@ -36,10 +39,7 @@ namespace PublicarAcaoWeb
         private void Form1_Load(object sender, EventArgs e)
         {
             teste = true;
-
-
-
-
+            data = DateTime.Now.ToString("dd/MM/yyyy");
 
             Security.remote();
 
@@ -51,8 +51,8 @@ namespace PublicarAcaoWeb
 
             if (passedInArgs.Contains("-a") || passedInArgs.Contains("-A"))
             {
-                // Use ConfigureAwait(false) e não espere pelo resultado na UI thread
-                Task.Run(() => EnviarNotificacaoPorcentagemFaltasParaCordenadorAsync())
+                // Executa a rotina de publicação de ações automaticamente
+                Task.Run(() => ExecutarRotinaPublicacaoAcoesAsync())
                     .ContinueWith(t =>
                     {
                         if (t.IsFaulted && t.Exception != null)
@@ -62,21 +62,17 @@ namespace PublicarAcaoWeb
                         }
                         Application.Exit();
                     }, TaskScheduler.FromCurrentSynchronizationContext());
-
-                // Não use Cursor.Current aqui, pois bloqueará a thread de UI
             }
         }
 
         private void button1_Click(object sender, EventArgs e)
         {
-            // Melhor abordagem: mudar o cursor antes e depois, sem bloquear a UI
+            // Execução manual da rotina
             Cursor = Cursors.WaitCursor;
 
-            // Use ConfigureAwait(false) para evitar retornar à thread de UI desnecessariamente
-            Task.Run(() => EnviarNotificacaoPorcentagemFaltasParaCordenadorAsync())
+            Task.Run(() => ExecutarRotinaPublicacaoAcoesAsync())
                 .ContinueWith(t =>
                 {
-                    // Volte ao cursor normal quando terminar (na thread de UI)
                     Cursor = Cursors.Default;
 
                     if (t.IsFaulted && t.Exception != null)
@@ -87,132 +83,395 @@ namespace PublicarAcaoWeb
                 }, TaskScheduler.FromCurrentSynchronizationContext());
         }
 
-        // Torne o método completamente assíncrono
-        private async Task EnviarNotificacaoPorcentagemFaltasParaCordenadorAsync()
+        private async Task ExecutarRotinaPublicacaoAcoesAsync()
         {
             try
             {
-                // Inicializa a conexão em uma task separada
+                // Inicializa a conexão
                 await Task.Run(() => Connect.HTlocalConnect.ConnInit()).ConfigureAwait(false);
 
-                string queryFormandos = @"
-                    SELECT *
-                    FROM (SELECT * FROM TBForFormandos) as Formandos, 
-                    (SELECT Codigo_Entidade, Codigo_Pais, Rua, Localidade, Codigo_Postal, SubCodigo_Postal, Descricao_Postal FROM TBGerMoradas where Tipo_Entidade = 3) as Moradas, 
-                    (SELECT Codigo_Entidade, Telefone1, Telefone2, Email1, Email2 FROM TBGerContactos  where Tipo_Entidade = 3) as Contactos, 
-                    (SELECT a.codigo_curso, a.Numero_Accao, f.codigo_formando, f.formando, a.Ref_Accao, c.Descricao, a.Data_Inicio, a.Data_Fim, c.Tipo_Curso, a.Cod_Tecn_Resp FROM TBForInscricoes i 
-                        INNER JOIN TBForFormandos f ON i.codigo_formando = f.codigo_formando and i.confirmado = 1 and i.desistente = 0 
-                        INNER JOIN TBForAccoes a ON a.versao_rowid = i.rowid_accao INNER JOIN TBForCursos c ON a.codigo_curso = c.codigo_curso WHERE a.Ref_Accao IN 
-                        (SELECT DISTINCT Ref_Accao
-                            FROM [secretariaVirtual].[dbo].[AcoesConfirmadas] af
-                            INNER JOIN TBForAccoes a ON a.versao_rowid = af.versao_rowid
-                            INNER JOIN TBForCursos c ON c.Codigo_Curso = a.Codigo_Curso
-                            INNER JOIN TbForTiposCurso tc ON tc.Tipo = c.Tipo_Curso
-                            WHERE CAST(af.versao_data AS DATE) = CAST(DATEADD(DAY, -1, GETDATE()) AS DATE))
-                    ) as Turmas 
-                    where Formandos.versao_rowid = Moradas.Codigo_Entidade AND Formandos.versao_rowid = Contactos.Codigo_Entidade AND Turmas.Codigo_Formando = Formandos.Codigo_Formando 
-                    order by Ref_Accao";
+                // Busca as ações que precisam ser processadas
+                string queryAcoes = @"
+                    DECLARE @data_base DATE = CAST(GETDATE() AS DATE); -- Data de hoje
 
-                // Use um método totalmente assíncrono para processar os dados
-                DataTable dataTableFormandos = new DataTable();
+                    -- ======================================================================
+                    -- Blocos de estados auditados
+                    -- ======================================================================
+                    WITH adiados AS (
+	                    SELECT versao_rowid_Accao, versao_data
+	                    FROM (
+		                    SELECT *,
+			                       ROW_NUMBER() OVER (PARTITION BY versao_rowid_Accao ORDER BY versao_data DESC) AS rn
+		                    FROM TBAuditAccoes
+		                    WHERE CAST(versao_data AS DATE) = @data_base
+	                    ) o
+	                    WHERE rn = 1 AND Codigo_Estado = 2 AND Codigo_Estado_Antigo != 2
+                    ),
+                    confirmados AS (
+	                    SELECT versao_rowid_Accao
+	                    FROM (
+		                    SELECT *,
+			                       ROW_NUMBER() OVER (PARTITION BY versao_rowid_Accao ORDER BY versao_data DESC) AS rn
+		                    FROM TBAuditAccoes
+		                    WHERE CAST(versao_data AS DATE) = @data_base
+	                    ) o
+	                    WHERE rn = 1 
+	                      AND Codigo_Estado IN (1,5)
+	                      AND ((Codigo_Estado = 1 AND Codigo_Estado_Antigo <> 1)
+		                    OR (Codigo_Estado = 5 AND Codigo_Estado_Antigo <> 5))
+                    ),
+                    confirmados_provisorios AS (
+	                    SELECT versao_rowid_Accao
+	                    FROM (
+		                    SELECT *,
+			                       ROW_NUMBER() OVER (PARTITION BY versao_rowid_Accao ORDER BY versao_data DESC) AS rn
+		                    FROM TBAuditAccoes
+		                    WHERE CAST(versao_data AS DATE) = @data_base
+	                    ) o
+	                    WHERE rn = 1 
+	                      AND Codigo_Estado = 13
+	                      AND Codigo_Estado_Antigo <> 13
+                    ),
+                    cancelados AS (
+	                    SELECT versao_rowid_Accao
+	                    FROM (
+		                    SELECT *,
+			                       ROW_NUMBER() OVER (PARTITION BY versao_rowid_Accao ORDER BY versao_data DESC) AS rn
+		                    FROM TBAuditAccoes
+		                    WHERE CAST(versao_data AS DATE) = @data_base
+	                    ) o
+	                    WHERE rn = 1 AND Codigo_Estado = 3 AND Codigo_Estado_Antigo != 3
+                    ),
+
+                    -- ======================================================================
+                    -- % de aceitação (sessões validadas / total)
+                    -- ======================================================================
+                    SessoesValidadas AS (
+	                    SELECT s.Rowid_Accao, COUNT(*) AS sessoes_validadas
+	                    FROM secretariaVirtual.dbo.agenda_formador_disponibilidade d
+	                    JOIN TBForSessoes s ON d.rowid_sessao = s.versao_rowid
+	                    WHERE d.historico = 0 AND d.estado IN ('D','A')
+	                    GROUP BY s.Rowid_Accao
+                    ),
+                    TotalSessoes AS (
+	                    SELECT Rowid_Accao, COUNT(*) AS numero_de_sessoes
+	                    FROM TBForSessoes
+	                    WHERE Codigo_Formador NOT IN (15683,15684,1053,1058,1425,704,699)
+	                    GROUP BY Rowid_Accao
+                    ),
+                    Aceitacao AS (
+	                    SELECT 
+		                    t.Rowid_Accao,
+		                    CAST(ROUND(
+			                    (CAST(v.sessoes_validadas AS FLOAT) / NULLIF(t.numero_de_sessoes, 0)) * 100, 2
+		                    ) AS DECIMAL(5,2)) AS perc_sessoes_validadas
+	                    FROM TotalSessoes t
+	                    LEFT JOIN SessoesValidadas v ON t.Rowid_Accao = v.Rowid_Accao
+                    ),
+
+                    -- ======================================================================
+                    -- Próxima ação futura do mesmo curso
+                    -- ======================================================================
+                    ProximaAccao AS (
+	                    SELECT 
+		                    a.Codigo_Curso,
+		                    a.Ref_Accao,
+		                    (
+			                    SELECT TOP 1 a2.Ref_Accao
+			                    FROM humantrain.dbo.TBForAccoes a2
+			                    JOIN humantrain.dbo.TBForEstados e2 ON e2.Codigo_Estado = a2.Codigo_Estado
+			                    LEFT JOIN humantrain.dbo.TBForCandAccoes n2 
+				                    ON n2.Codigo_Curso = a2.Codigo_Curso 
+			                       AND n2.Numero_Accao = a2.Numero_Accao
+			                    WHERE a2.Codigo_Curso = a.Codigo_Curso 
+			                      AND a2.Ref_Accao <> a.Ref_Accao
+			                      AND a2.Data_Inicio > @data_base
+			                      AND e2.Codigo_Estado NOT IN (2,3)
+			                    ORDER BY a2.Data_Inicio ASC
+		                    ) AS Prox_Ref_Accao,
+		                    (
+			                    SELECT TOP 1 a2.Data_Inicio
+			                    FROM humantrain.dbo.TBForAccoes a2
+			                    JOIN humantrain.dbo.TBForEstados e2 ON e2.Codigo_Estado = a2.Codigo_Estado
+			                    WHERE a2.Codigo_Curso = a.Codigo_Curso 
+			                      AND a2.Ref_Accao <> a.Ref_Accao
+			                      AND a2.Data_Inicio > @data_base
+			                      AND e2.Codigo_Estado NOT IN (2,3)
+			                    ORDER BY a2.Data_Inicio ASC
+		                    ) AS Prox_Data_Inicio,
+		                    (
+			                    SELECT TOP 1 e2.Estado
+			                    FROM humantrain.dbo.TBForAccoes a2
+			                    JOIN humantrain.dbo.TBForEstados e2 ON e2.Codigo_Estado = a2.Codigo_Estado
+			                    WHERE a2.Codigo_Curso = a.Codigo_Curso 
+			                      AND a2.Ref_Accao <> a.Ref_Accao
+			                      AND a2.Data_Inicio > @data_base
+			                      AND e2.Codigo_Estado NOT IN (2,3)
+			                    ORDER BY a2.Data_Inicio ASC
+		                    ) AS Prox_Estado,
+		                    (
+			                    SELECT TOP 1 n2.Pub_Web
+			                    FROM humantrain.dbo.TBForAccoes a2
+			                    JOIN humantrain.dbo.TBForEstados e2 ON e2.Codigo_Estado = a2.Codigo_Estado
+			                    LEFT JOIN humantrain.dbo.TBForCandAccoes n2 
+				                    ON n2.Codigo_Curso = a2.Codigo_Curso 
+			                       AND n2.Numero_Accao = a2.Numero_Accao
+			                    WHERE a2.Codigo_Curso = a.Codigo_Curso 
+			                      AND a2.Ref_Accao <> a.Ref_Accao
+			                      AND a2.Data_Inicio > @data_base
+			                      AND e2.Codigo_Estado NOT IN (2,3)
+			                    ORDER BY a2.Data_Inicio ASC
+		                    ) AS Prox_Pub_Web
+	                    FROM humantrain.dbo.TBForAccoes a
+                    )
+
+                    -- ======================================================================
+                    -- Consulta final consolidada
+                    -- ======================================================================
+                    SELECT DISTINCT 
+	                    c.Codigo_Curso,
+	                    c.Descricao,
+	                    c.Tipo_Curso,
+	                    a.Ref_Accao,
+	                    ISNULL(ace.perc_sessoes_validadas, 0) AS Perc_Aceitacao,
+	                    CASE 
+		                    WHEN adiados.versao_rowid_Accao IS NOT NULL THEN 'Adiado'
+		                    WHEN confirmados.versao_rowid_Accao IS NOT NULL THEN 'Confirmado'
+		                    WHEN confirmados_provisorios.versao_rowid_Accao IS NOT NULL THEN 'Confirmado Provisório'
+		                    WHEN cancelados.versao_rowid_Accao IS NOT NULL THEN 'Cancelado'
+		                    WHEN (c.Tipo_Curso IN ('11','12') AND CAST(COALESCE(Qfasecandidatura.qfasedata, TfaseCandidatura.tfasedata, SfaseCandidatura.sfasedata, Pfasecandidatura.pfasedata) AS DATE) = @data_base)
+			                      OR (c.Tipo_Curso NOT IN ('11','12') AND CAST(COALESCE(Qfasecandidatura.qfasedata, TfaseCandidatura.tfasedata, SfaseCandidatura.sfasedata, Pfasecandidatura.pfasedata) AS DATE) = @data_base)
+		                    THEN 'Fases Caducadas'
+		                    ELSE 'Outros'
+	                    END AS Motivo,
+
+	                    -- Nova coluna para data que gerou o motivo
+	                    CASE
+		                    WHEN adiados.versao_rowid_Accao IS NOT NULL THEN adiados.versao_data 
+		                    WHEN (c.Tipo_Curso IN ('11','12') AND COALESCE(Qfasecandidatura.qfasedata, TfaseCandidatura.tfasedata, SfaseCandidatura.sfasedata, Pfasecandidatura.pfasedata) = @data_base)
+			                      OR (c.Tipo_Curso NOT IN ('11','12') AND COALESCE(Qfasecandidatura.qfasedata, TfaseCandidatura.tfasedata, SfaseCandidatura.sfasedata, Pfasecandidatura.pfasedata) = @data_base)
+		                    THEN COALESCE(Qfasecandidatura.qfasedata, TfaseCandidatura.tfasedata, SfaseCandidatura.sfasedata, Pfasecandidatura.pfasedata) 
+		                    ELSE NULL
+	                    END AS Data_Motivo,
+
+	                    -- Log separado em colunas
+	                    CASE WHEN pa.Prox_Ref_Accao IS NULL THEN 'Não Tratado'
+		                     WHEN pa.Prox_Pub_Web = 1 THEN 'Já Publicado'
+		                     ELSE 'Já Tratado'
+	                    END AS Status_Tratamento,
+	                    FORMAT(pa.Prox_Data_Inicio, 'dd/MM/yyyy') AS Prox_Data_Inicio,
+	                    pa.Prox_Ref_Accao,
+	                    pa.Prox_Estado,
+	                    pa.Prox_Pub_Web
+
+                    FROM humantrain.dbo.TBForAccoes a
+                    JOIN humantrain.dbo.TBForCursos c ON a.Codigo_Curso = c.Codigo_Curso
+                    JOIN humantrain.dbo.TBForEstados e ON e.Codigo_Estado = a.Codigo_Estado
+                    LEFT JOIN (
+	                    SELECT rowid_ecran, valor AS pfasedata FROM humantrain.dbo.TBGerCUValores WHERE nome_campo = 'Pfasecandidatura'
+                    ) Pfasecandidatura ON a.versao_rowid = Pfasecandidatura.rowid_ecran
+                    LEFT JOIN (
+	                    SELECT rowid_ecran, valor AS sfasedata FROM humantrain.dbo.TBGerCUValores WHERE nome_campo = 'Sfasecandidatura'
+                    ) SfaseCandidatura ON a.versao_rowid = SfaseCandidatura.rowid_ecran
+                    LEFT JOIN (
+	                    SELECT rowid_ecran, valor AS tfasedata FROM humantrain.dbo.TBGerCUValores WHERE nome_campo = 'Tfasecandidatura'
+                    ) TfaseCandidatura ON a.versao_rowid = TfaseCandidatura.rowid_ecran
+                    LEFT JOIN (
+	                    SELECT rowid_ecran, valor AS qfasedata FROM humantrain.dbo.TBGerCUValores WHERE nome_campo = 'Ufasecandidatura'
+                    ) Qfasecandidatura ON a.versao_rowid = Qfasecandidatura.rowid_ecran
+                    LEFT JOIN adiados ON a.versao_rowid = adiados.versao_rowid_Accao
+                    LEFT JOIN confirmados ON a.versao_rowid = confirmados.versao_rowid_Accao
+                    LEFT JOIN confirmados_provisorios ON a.versao_rowid = confirmados_provisorios.versao_rowid_Accao
+                    LEFT JOIN cancelados ON a.versao_rowid = cancelados.versao_rowid_Accao
+                    LEFT JOIN Aceitacao ace ON a.versao_rowid = ace.Rowid_Accao
+                    LEFT JOIN ProximaAccao pa ON pa.Codigo_Curso = a.Codigo_Curso AND pa.Ref_Accao = a.Ref_Accao
+                    WHERE 
+                    (
+	                    (c.Tipo_Curso IN ('11','12') AND CAST(COALESCE(Qfasecandidatura.qfasedata, TfaseCandidatura.tfasedata, SfaseCandidatura.sfasedata, Pfasecandidatura.pfasedata) AS DATE) = @data_base)
+                     OR
+	                    (c.Tipo_Curso NOT IN ('11','12') AND CAST(COALESCE(Qfasecandidatura.qfasedata, TfaseCandidatura.tfasedata, SfaseCandidatura.sfasedata, Pfasecandidatura.pfasedata) AS DATE) = @data_base)
+                     OR
+	                    (adiados.versao_rowid_Accao IS NOT NULL)
+                     OR
+	                    (confirmados.versao_rowid_Accao IS NOT NULL)
+                     OR
+	                    (confirmados_provisorios.versao_rowid_Accao IS NOT NULL)
+                     OR
+	                    (cancelados.versao_rowid_Accao IS NOT NULL)
+                    )
+                    AND a.Ref_Accao NOT LIKE 'FM_%'
+                    ORDER BY c.Descricao;";
+
+                DataTable dataTableAcoes = new DataTable();
 
                 await Task.Run(() =>
                 {
-                    using (SqlDataAdapter adapterFormandos = new SqlDataAdapter(queryFormandos, Connect.HTlocalConnect.Conn))
+                    using (SqlDataAdapter adapterAcoes = new SqlDataAdapter(queryAcoes, Connect.HTlocalConnect.Conn))
                     {
-                        adapterFormandos.Fill(dataTableFormandos);
+                        adapterAcoes.Fill(dataTableAcoes);
                     }
                 }).ConfigureAwait(false);
 
-                alunos = dataTableFormandos.AsEnumerable().Select(row => new Formando
+                // Converte os dados para objetos
+                acoesParaProcessar = dataTableAcoes.AsEnumerable().Select(row => new AcaoParaPublicacao
                 {
-                    CodigoCurso = row.Field<string>("codigo_curso")?.Trim(),
-                    CodigoFormando = row.Field<int?>("Codigo_Formando") ?? 0,
-                    RefAccao = row.Field<string>("Ref_Accao")?.Trim(),
-                    DataInicio = row.IsNull("Data_Inicio") ? (DateTime?)null : row.Field<DateTime>("Data_Inicio"),
-                    DataFim = row.IsNull("Data_Fim") ? (DateTime?)null : row.Field<DateTime>("Data_Fim"),
-                    TipoCurso = row.Field<string>("Tipo_Curso")?.Trim(),
-                    CodTecnResp = row.Field<string>("Cod_Tecn_Resp")?.Trim(),
+                    CodigoCurso = row.Field<string>("Codigo_Curso")?.Trim(),
                     Descricao = row.Field<string>("Descricao")?.Trim(),
-                    NumeroAccao = row.Field<int?>("Numero_Accao") ?? 0,
-                    NomeAbreviado = row.Field<string>("Nome_Abreviado")?.Trim(),
-                    Email = row.Field<string>("Email1")?.Trim(),
-                    Sexo = row.Field<string>("Sexo")?.Trim(),
-                    Telefone = row.Field<string>("Telefone1")?.Trim(),
+                    TipoCurso = row.Field<string>("Tipo_Curso")?.Trim(),
+                    RefAccao = row.Field<string>("Ref_Accao")?.Trim(),
+                    PercAceitacao = row.Field<decimal?>("Perc_Aceitacao") ?? 0,
+                    Motivo = row.Field<string>("Motivo")?.Trim(),
+                    DataMotivo = row.IsNull("Data_Motivo") ? (DateTime?)null : row.Field<DateTime>("Data_Motivo"),
+                    StatusTratamento = row.Field<string>("Status_Tratamento")?.Trim(),
+                    ProxDataInicio = row.Field<string>("Prox_Data_Inicio")?.Trim(),
+                    ProxRefAccao = row.Field<string>("Prox_Ref_Accao")?.Trim(),
+                    ProxEstado = row.Field<string>("Prox_Estado")?.Trim(),
+                    ProxPubWeb = row.Field<int?>("Prox_Pub_Web")
                 }).ToList();
 
                 await Task.Run(() => Connect.HTlocalConnect.ConnEnd()).ConfigureAwait(false);
 
+                // Processa cada ação
                 using (var httpClient = new HttpClient())
                 {
-                    httpClient.Timeout = TimeSpan.FromSeconds(10);
+                    httpClient.Timeout = TimeSpan.FromSeconds(30);
 
-                    // Processar cada aluno usando chamadas assíncronas
-                    foreach (var aluno in alunos)
+                    foreach (var acao in acoesParaProcessar)
                     {
-                        // Nao envia para formacao a medida
-                        if (aluno.RefAccao.StartsWith("FM_") || aluno.RefAccao.StartsWith("A"))
-                            continue;
-
-                        // Construir a requisição
-                        var request = new HttpRequestMessage(HttpMethod.Post, "http://192.168.1.213:8080/api/email/confirmada-acao-aluno");
-                        //var request = new HttpRequestMessage(HttpMethod.Post, "http://localhost:5141/api/email/confirmada-acao-aluno");
-
-                        var content = new StringContent(
-                            JsonConvert.SerializeObject(new
-                            {
-                                RefAccao = aluno.RefAccao.ToString(),
-                                Tipo = "confirmada_acao_aluno",
-                                Role = "formando",
-                                CodHt = aluno.CodigoFormando.ToString(),
-                                SessaoId = string.Empty
-                            }),
-                            Encoding.UTF8,
-                            "application/json"
-                        );
-
-                        request.Content = content;
-
-                        // Chamada assíncrona ao serviço HTTP
-                        var response = await httpClient.SendAsync(request).ConfigureAwait(false);
-
-                        if (response.IsSuccessStatusCode)
+                        // Processa apenas ações com Status_Tratamento = "Já Tratado"
+                        if (acao.StatusTratamento != "Já Tratado")
                         {
-                            var responseContent = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                            var retornoAlunosWrapper = JsonConvert.DeserializeObject<EmailResponseWrapper>(responseContent);
-                            var retornoAlunos = retornoAlunosWrapper.Templates;
-
-                            foreach (var retornoAluno in retornoAlunos)
+                            // Adiciona ao relatório como "não precisou"
+                            listAcoesPublicadas.Add(new RelatorioPublicacao
                             {
-                                Relatorio relatorioFinal = new Relatorio()
+                                RefAccao = acao.RefAccao,
+                                Descricao = acao.Descricao,
+                                Acao = "Não processada",
+                                Motivo = $"Status: {acao.StatusTratamento}",
+                                PercAceitacao = acao.PercAceitacao,
+                                Sucesso = true,
+                                Erro = ""
+                            });
+                            continue;
+                        }
+
+                        // Para ações "Já Tratado" com mais de 50% de aceitação - não faz nada
+                        if (acao.PercAceitacao >= 50)
+                        {
+                            listAcoesPublicadas.Add(new RelatorioPublicacao
+                            {
+                                RefAccao = acao.RefAccao,
+                                Descricao = acao.Descricao,
+                                Acao = "Não precisou publicar",
+                                Motivo = $"Aceitação >= 50% ({acao.PercAceitacao}%)",
+                                PercAceitacao = acao.PercAceitacao,
+                                Sucesso = true,
+                                Erro = ""
+                            });
+
+                            // Registra log
+                            await Task.Run(() => RegistraLog(acao.RefAccao, $"Ação não publicada - Aceitação >= 50% ({acao.PercAceitacao}%) || Ref Ação: {acao.RefAccao}", "Publicação Ação", acao.RefAccao)).ConfigureAwait(false);
+                            continue;
+                        }
+
+                        // Para ações com menos de 50% de aceitação - publicar a próxima ação
+                        if (string.IsNullOrEmpty(acao.ProxRefAccao))
+                        {
+                            listAcoesPublicadas.Add(new RelatorioPublicacao
+                            {
+                                RefAccao = acao.RefAccao,
+                                Descricao = acao.Descricao,
+                                Acao = "Erro - Não há próxima ação",
+                                Motivo = $"Aceitação < 50% ({acao.PercAceitacao}%) mas não há próxima ação",
+                                PercAceitacao = acao.PercAceitacao,
+                                Sucesso = false,
+                                Erro = "Próxima ação não encontrada"
+                            });
+                            continue;
+                        }
+
+                        // Chama a API de publicação
+                        try
+                        {
+                            var publicacaoRequest = new PublicacaoRequest
+                            {
+                                RefAccao = acao.ProxRefAccao,
+                                Acao = "publicar"
+                            };
+
+                            var request = new HttpRequestMessage(HttpMethod.Post, API_PUBLICAR);
+                            var content = new StringContent(
+                                JsonConvert.SerializeObject(publicacaoRequest),
+                                Encoding.UTF8,
+                                "application/json"
+                            );
+                            request.Content = content;
+
+                            var response = await httpClient.SendAsync(request).ConfigureAwait(false);
+                            var responseContent = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+                            if (response.IsSuccessStatusCode)
+                            {
+                                var publicacaoResponse = JsonConvert.DeserializeObject<PublicacaoResponse>(responseContent);
+
+                                listAcoesPublicadas.Add(new RelatorioPublicacao
                                 {
-                                    NomeFormador = aluno.NomeAbreviado,
-                                    EmailFormador = aluno.Email,
-                                    RefAcao = aluno.RefAccao
-                                };
+                                    RefAccao = acao.RefAccao,
+                                    Descricao = acao.Descricao,
+                                    Acao = $"Publicada próxima ação: {acao.ProxRefAccao}",
+                                    Motivo = $"Aceitação < 50% ({acao.PercAceitacao}%)",
+                                    PercAceitacao = acao.PercAceitacao,
+                                    Sucesso = publicacaoResponse?.Success ?? true,
+                                    Erro = publicacaoResponse?.Success == false ? publicacaoResponse.Message : ""
+                                });
 
-                                // Envio de email e registro de log - sem bloquear a UI
-                                await Task.Run(() => sendEmail(retornoAluno.TemplateHtmlFinal, "", false, aluno.Email, "", aluno, retornoAluno.CoordenadorEmail)).ConfigureAwait(false);
-                                await Task.Run(() => RegistraLog(aluno.CodigoFormando.ToString(), $"Enviado email de aconfirmação da açãopara o formando via Rotina || Ref Ação: {aluno.RefAccao} ", "Ação Confirmada Formando (Aluno)", aluno.RefAccao)).ConfigureAwait(false);
-
-                                listFormandosNotificados.Add(relatorioFinal);
+                                // Registra log
+                                await Task.Run(() => RegistraLog(acao.RefAccao, $"Publicada próxima ação {acao.ProxRefAccao} - Aceitação < 50% ({acao.PercAceitacao}%) || Ref Ação: {acao.RefAccao}", "Publicação Ação", acao.RefAccao)).ConfigureAwait(false);
                             }
+                            else
+                            {
+                                listAcoesPublicadas.Add(new RelatorioPublicacao
+                                {
+                                    RefAccao = acao.RefAccao,
+                                    Descricao = acao.Descricao,
+                                    Acao = "Erro na publicação",
+                                    Motivo = $"Aceitação < 50% ({acao.PercAceitacao}%)",
+                                    PercAceitacao = acao.PercAceitacao,
+                                    Sucesso = false,
+                                    Erro = $"HTTP {response.StatusCode}: {responseContent}"
+                                });
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            listAcoesPublicadas.Add(new RelatorioPublicacao
+                            {
+                                RefAccao = acao.RefAccao,
+                                Descricao = acao.Descricao,
+                                Acao = "Erro na publicação",
+                                Motivo = $"Aceitação < 50% ({acao.PercAceitacao}%)",
+                                PercAceitacao = acao.PercAceitacao,
+                                Sucesso = false,
+                                Erro = ex.Message
+                            });
+
+                            // Log do erro
+                            await Task.Run(() => sendEmail(ex.ToString(), Settings.Default.emailenvio, true, "informatica", "")).ConfigureAwait(false);
                         }
                     }
                 }
 
-                // Enviar o relatório final de forma assíncrona
+                // Envia o relatório final
                 await Task.Run(() => sendEmailRelatorio()).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
-                // Log do erro sem bloquear a UI
+                // Log do erro principal
                 await Task.Run(() => sendEmail(ex.ToString(), Settings.Default.emailenvio, true, "informatica", "")).ConfigureAwait(false);
             }
         }
 
-        // Métodos de envio de email devem ser atualizados para ser assíncronos também
-        private async Task sendEmailRelatorioAsync()
+        private void sendEmailRelatorio()
         {
             try
             {
@@ -243,56 +502,73 @@ namespace PublicarAcaoWeb
                         string body = "";
 
                         // Mostra relatório
-                        if (listFormandosNotificados != null && listFormandosNotificados.Count > 0)
+                        if (listAcoesPublicadas != null && listAcoesPublicadas.Count > 0)
                         {
                             StringBuilder relatorio = new StringBuilder();
-                            relatorio.AppendLine("Relatório de Formandos Notificados para Ações Confirmadas (alunos):<br><br>");
+                            relatorio.AppendLine("Relatório de Publicação de Ações:<br><br>");
 
-                            string previousRefAcao = null;
+                            // Agrupa por tipo de ação
+                            var acoesPublicadas = listAcoesPublicadas.Where(x => x.Acao.Contains("Publicada")).ToList();
+                            var acoesNaoPublicadas = listAcoesPublicadas.Where(x => x.Acao.Contains("Não precisou")).ToList();
+                            var acoesNaoProcessadas = listAcoesPublicadas.Where(x => x.Acao.Contains("Não processada")).ToList();
+                            var acoesComErro = listAcoesPublicadas.Where(x => !x.Sucesso).ToList();
 
-                            foreach (var formando in listFormandosNotificados)
+                            if (acoesPublicadas.Count > 0)
                             {
-                                if (previousRefAcao != null && formando.RefAcao != previousRefAcao)
+                                relatorio.AppendLine("<h3>Ações Publicadas:</h3>");
+                                foreach (var acao in acoesPublicadas)
                                 {
-                                    relatorio.AppendLine("<hr>");
+                                    relatorio.AppendLine($"<b>Ref Ação:</b> {acao.RefAccao} | <b>Curso:</b> {acao.Descricao} | <b>Ação:</b> {acao.Acao} | <b>Motivo:</b> {acao.Motivo}<br>");
                                 }
-
-                                relatorio.AppendLine($"<b>Formando (aluno):</b> {formando.NomeFormador}  |  Email: {formando.EmailFormador}  |  Ref Ação: {formando.RefAcao}<br>");
-
-                                previousRefAcao = formando.RefAcao;
+                                relatorio.AppendLine("<br>");
                             }
+
+                            if (acoesNaoPublicadas.Count > 0)
+                            {
+                                relatorio.AppendLine("<h3>Ações que não precisaram ser publicadas:</h3>");
+                                foreach (var acao in acoesNaoPublicadas)
+                                {
+                                    relatorio.AppendLine($"<b>Ref Ação:</b> {acao.RefAccao} | <b>Curso:</b> {acao.Descricao} | <b>Motivo:</b> {acao.Motivo}<br>");
+                                }
+                                relatorio.AppendLine("<br>");
+                            }
+
+                            if (acoesNaoProcessadas.Count > 0)
+                            {
+                                relatorio.AppendLine("<h3>Ações não processadas:</h3>");
+                                foreach (var acao in acoesNaoProcessadas)
+                                {
+                                    relatorio.AppendLine($"<b>Ref Ação:</b> {acao.RefAccao} | <b>Curso:</b> {acao.Descricao} | <b>Motivo:</b> {acao.Motivo}<br>");
+                                }
+                                relatorio.AppendLine("<br>");
+                            }
+
+                            if (acoesComErro.Count > 0)
+                            {
+                                relatorio.AppendLine("<h3>Ações com erro:</h3>");
+                                foreach (var acao in acoesComErro)
+                                {
+                                    relatorio.AppendLine($"<b>Ref Ação:</b> {acao.RefAccao} | <b>Curso:</b> {acao.Descricao} | <b>Erro:</b> {acao.Erro}<br>");
+                                }
+                                relatorio.AppendLine("<br>");
+                            }
+
                             body = relatorio.ToString();
                         }
                         else
                         {
-                            body = "Não há ações confirmadas no dia de hoje.";
+                            body = "Não há ações para processar no dia de hoje.";
                         }
 
-                        mm.Subject = "Instituto CRIAP || Relatório - Notificação Formando (aluno) - Ação Confirmada" + data;
+                        mm.Subject = "Instituto CRIAP || Relatório - Publicação de Ações " + data;
                         mm.BodyEncoding = UTF8Encoding.UTF8;
                         mm.IsBodyHtml = true;
                         mm.DeliveryNotificationOptions = DeliveryNotificationOptions.OnFailure;
                         mm.Body = body + "<br> " + versao;
 
-                        // Envio de e-mail de forma assíncrona para não bloquear
-                        await Task.Run(() => client.Send(mm)).ConfigureAwait(false);
+                        client.Send(mm);
                     }
                 }
-            }
-            catch (Exception ex)
-            {
-                // Log do erro
-                await Task.Run(() => sendEmail(ex.ToString(), Settings.Default.emailenvio, true, "informatica", "")).ConfigureAwait(false);
-            }
-        }
-
-        // Manter o método síncrono original para compatibilidade
-        private void sendEmailRelatorio()
-        {
-            try
-            {
-                // Chama diretamente o método assíncrono e aguarda, mas fora da thread de UI
-                Task.Run(() => sendEmailRelatorioAsync()).Wait();
             }
             catch (Exception ex)
             {
@@ -300,7 +576,7 @@ namespace PublicarAcaoWeb
             }
         }
 
-        private void sendEmail(string body, string tecnica = "", bool error = false, string emailPessoa = "", string temp = "", Formando acao = null, string coordenadorEmail = "")
+        private void sendEmail(string body, string tecnica = "", bool error = false, string emailPessoa = "", string temp = "")
         {
             try
             {
@@ -322,14 +598,6 @@ namespace PublicarAcaoWeb
                         mm.To.Add(emailPessoa);
                         mm.CC.Add("informatica@criap.com");
                         mm.CC.Add("tecnicopedagogico@criap.com");
-                        if(coordenadorEmail != "")
-                        {
-                            mm.ReplyToList.Add(new MailAddress(coordenadorEmail));
-                        }
-                        else
-                        {
-                            mm.ReplyToList.Add(new MailAddress("tecnicopedagogico@criap.com"));
-                        }
                     }
                     else
                     {
@@ -344,9 +612,7 @@ namespace PublicarAcaoWeb
                         mm.To.Add("raphaelcastro@criap.com");
                 }
 
-                mm.Subject = (!teste) ? "Ação Confirmada / " : data + " TESTE - Ação Confirmada - Formandos // ";
-                if (!error && acao != null)
-                    mm.Subject += (acao.NumeroAccao == null) ? "" : acao.Descricao + " - " + acao.NumeroAccao + "ª Edição";
+                mm.Subject = (!teste) ? "Publicação de Ações / " : data + " TESTE - Publicação de Ações // ";
                 mm.BodyEncoding = UTF8Encoding.UTF8;
                 mm.IsBodyHtml = true;
                 mm.DeliveryNotificationOptions = DeliveryNotificationOptions.OnFailure;
@@ -359,15 +625,15 @@ namespace PublicarAcaoWeb
             }
         }
 
-        public void RegistraLog(string id, string mensagem, string menu, string refAcao)
+        public void RegistraLog(string refAcao, string mensagem, string menu, string refAcaoLog)
         {
             List<objLogSendersFormador> logSenders = new List<objLogSendersFormador>();
             logSenders.Add(new objLogSendersFormador
             {
-                idFormador = id,
+                idFormador = refAcao,
                 mensagem = mensagem,
                 menu = menu,
-                refAccao = refAcao
+                refAccao = refAcaoLog
             });
             DataBaseLogSave(logSenders);
         }
