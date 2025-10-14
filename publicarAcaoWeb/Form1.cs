@@ -789,7 +789,7 @@ namespace PublicarAcaoWeb
                         if (listAcoesPublicadas != null && listAcoesPublicadas.Count > 0)
                         {
                             StringBuilder relatorio = new StringBuilder();
-                            relatorio.AppendLine("Relatório de Publicação de Ações:<br><br>");
+                            relatorio.AppendLine("Relatório de Publicação de Ações Web:<br><br>");
 
                             // Agrupa por tipo de ação
                             var acoesPublicadas = listAcoesPublicadas.Where(x => x.Acao.Contains("Publicada") && !x.Acao.Contains("Despublicada")).ToList();
@@ -1011,7 +1011,7 @@ namespace PublicarAcaoWeb
                             body = "Não há ações para processar no dia de hoje.";
                         }
 
-                        mm.Subject = "Instituto CRIAP || Relatório - Publicação de Ações " + data.ToString("dd/MM/yyyy");
+                        mm.Subject = "Instituto CRIAP || Relatório - Publicação de Ações Web " + data.ToString("dd/MM/yyyy");
                         mm.BodyEncoding = UTF8Encoding.UTF8;
                         mm.IsBodyHtml = true;
                         mm.DeliveryNotificationOptions = DeliveryNotificationOptions.OnFailure;
@@ -1062,7 +1062,7 @@ namespace PublicarAcaoWeb
                         mm.To.Add("raphaelcastro@criap.com");
                 }
 
-                mm.Subject = (!teste) ? "Publicação de Ações / " : data.ToString("dd/MM/yyyy") + " TESTE - Publicação de Ações // ";
+                mm.Subject = (!teste) ? "Publicação de Ações Web / " : data.ToString("dd/MM/yyyy") + " TESTE - Publicação de Ações Web // ";
                 mm.BodyEncoding = UTF8Encoding.UTF8;
                 mm.IsBodyHtml = true;
                 mm.DeliveryNotificationOptions = DeliveryNotificationOptions.OnFailure;
