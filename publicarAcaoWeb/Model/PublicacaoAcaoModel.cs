@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace PublicarAcaoWeb.Model
 {
@@ -10,24 +11,42 @@ namespace PublicarAcaoWeb.Model
         public string RefAccao { get; set; }
         public decimal PercAceitacao { get; set; }
         public string Motivo { get; set; }
-        public DateTime? DataMotivo { get; set; }
+        public string DataMotivo { get; set; } // Changed to string to avoid cast issues
         public string StatusTratamento { get; set; }
         public string ProxDataInicio { get; set; }
         public string ProxRefAccao { get; set; }
         public string ProxEstado { get; set; }
-        public int? ProxPubWeb { get; set; }
+        public string ProxPubWeb { get; set; } // Changed to string to avoid cast issues
     }
 
-    public class PublicacaoRequest
-    {
-        public string RefAccao { get; set; }
-        public string Acao { get; set; } // "publicar" ou "despublicar"
-    }
-
+    // Response models matching the API specifications
     public class PublicacaoResponse
     {
-        public bool Success { get; set; }
-        public string Message { get; set; }
+        public bool Sucesso { get; set; }
+        public string Mensagem { get; set; }
+        public int LinhasAfetadas { get; set; }
+        public List<string> AcoesDespublicadas { get; set; }
+    }
+
+    public class DespublicacaoResponse
+    {
+        public bool Sucesso { get; set; }
+        public string Mensagem { get; set; }
+        public int LinhasAfetadas { get; set; }
+    }
+
+    public class StatusResponse
+    {
+        public string RefAccao { get; set; }
+        public bool Publicado { get; set; }
+        public string Status { get; set; }
+        public List<string> OutrasAcoesPublicadasDoMesmoCurso { get; set; }
+    }
+
+    public class ErrorResponse
+    {
+        public int CodigoErro { get; set; }
+        public string MensagemErro { get; set; }
     }
 
     public class RelatorioPublicacao
