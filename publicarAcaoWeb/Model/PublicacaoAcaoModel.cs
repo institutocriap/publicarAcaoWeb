@@ -1,4 +1,3 @@
-using System;
 using System.Collections.Generic;
 
 namespace PublicarAcaoWeb.Model
@@ -11,36 +10,20 @@ namespace PublicarAcaoWeb.Model
         public string RefAccao { get; set; }
         public decimal PercAceitacao { get; set; }
         public string Motivo { get; set; }
-        public string DataMotivo { get; set; } // Changed to string to avoid cast issues
+        public string DataMotivo { get; set; }
         public string StatusTratamento { get; set; }
         public string ProxDataInicio { get; set; }
         public string ProxRefAccao { get; set; }
         public string ProxEstado { get; set; }
-        public string ProxPubWeb { get; set; } // Changed to string to avoid cast issues
+        public string ProxPubWeb { get; set; }
     }
 
-    // Response models matching the API specifications
     public class PublicacaoResponse
     {
         public bool Sucesso { get; set; }
         public string Mensagem { get; set; }
         public int LinhasAfetadas { get; set; }
         public List<string> AcoesDespublicadas { get; set; }
-    }
-
-    public class DespublicacaoResponse
-    {
-        public bool Sucesso { get; set; }
-        public string Mensagem { get; set; }
-        public int LinhasAfetadas { get; set; }
-    }
-
-    public class StatusResponse
-    {
-        public string RefAccao { get; set; }
-        public bool Publicado { get; set; }
-        public string Status { get; set; }
-        public List<string> OutrasAcoesPublicadasDoMesmoCurso { get; set; }
     }
 
     public class ErrorResponse
@@ -53,7 +36,7 @@ namespace PublicarAcaoWeb.Model
     {
         public string RefAccao { get; set; }
         public string Descricao { get; set; }
-        public string Acao { get; set; } // "Publicada", "Não precisou publicar"
+        public string Acao { get; set; }
         public string Motivo { get; set; }
         public decimal PercAceitacao { get; set; }
         public bool Sucesso { get; set; }

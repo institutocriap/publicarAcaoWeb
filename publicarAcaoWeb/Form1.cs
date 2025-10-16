@@ -25,9 +25,7 @@ namespace PublicarAcaoWeb
         public string versao;
         private List<AcaoParaPublicacao> acoesParaProcessar;
         List<RelatorioPublicacao> listAcoesPublicadas = new List<RelatorioPublicacao>();
-
-        // URLs das APIs - Updated to use POST format
-        private const string API_BASE_URL = "http://localhost:5141/api/PublicaAcaoWeb";
+        private const string API_BASE_URL = "http://192.168.1.213:8080/api/PublicaAcaoWeb";
 
         public Form1()
         {
@@ -37,7 +35,7 @@ namespace PublicarAcaoWeb
 
         private void Form1_Load(object sender, EventArgs e)
         {
-            teste = true;
+            teste = false;
 
             if(teste)
                 data = new DateTime(2025,10,12);
@@ -54,49 +52,53 @@ namespace PublicarAcaoWeb
 
             if (passedInArgs.Contains("-a") || passedInArgs.Contains("-A"))
             {
-                // Executa a rotina de publicação de ações automaticamente
-                Task.Run(() => ExecutarRotinaPublicacaoAcoesAsync())
-                    .ContinueWith(t =>
-                    {
-                        if (t.IsFaulted && t.Exception != null)
-                        {
-                            // Log do erro sem bloquear a UI
-                            Task.Run(() => sendEmail(t.Exception.ToString(), Settings.Default.emailenvio, true, "informatica", ""));
-                        }
-                        Application.Exit();
-                    }, TaskScheduler.FromCurrentSynchronizationContext());
+                try
+                {
+                    ExecutarRotinaPublicacao();
+                }
+                catch (Exception ex)
+                {
+                    sendEmail(ex.ToString(), Settings.Default.emailenvio, true, "informatica", "");
+                }
+                finally
+                {
+                    Application.Exit();
+                }
             }
         }
 
         private void button1_Click(object sender, EventArgs e)
         {
-            // Execução manual da rotina
             Cursor = Cursors.WaitCursor;
 
-            Task.Run(() => ExecutarRotinaPublicacaoAcoesAsync())
-                .ContinueWith(t =>
-                {
-                    Cursor = Cursors.Default;
-
-                    if (t.IsFaulted && t.Exception != null)
-                    {
-                        // Log do erro sem bloquear a UI
-                        Task.Run(() => sendEmail(t.Exception.ToString(), Settings.Default.emailenvio, true, "informatica", ""));
-                    }
-                }, TaskScheduler.FromCurrentSynchronizationContext());
-        }
-
-        private async Task ExecutarRotinaPublicacaoAcoesAsync()
-        {
             try
             {
-                // Inicializa a conexão
-                await Task.Run(() => Connect.HTlocalConnect.ConnInit()).ConfigureAwait(false);
+                ExecutarRotinaPublicacao();
+            }
+            catch (Exception ex)
+            {
+                sendEmail(ex.ToString(), Settings.Default.emailenvio, true, "informatica", "");
+            }
+            finally
+            {
+                Cursor = Cursors.Default;
+            }
+        }
 
-                // Format the date for SQL
+        private void ExecutarRotinaPublicacao()
+        {
+            bool htConnAberta = false;
+            bool svConnAberta = false;
+            
+            try
+            {
+                listAcoesPublicadas.Clear();
+
+                Connect.HTlocalConnect.ConnInit();
+                htConnAberta = true;
+
                 string dataSql = data.ToString("yyyy-MM-dd");
 
-                // Primeiro, verifica ações que precisam ser despublicadas após 24h
                 string queryDespublicacao24h = $@"
                     DECLARE @data_base DATE = CAST('{dataSql}' AS DATE);
                     
@@ -105,7 +107,7 @@ namespace PublicarAcaoWeb
                         sp.RefAcaoParaDespublicar,
                         sp.DataQuandoPublicouSubstituta,
                         sp.MotivoSubstituicao,
-                        ISNULL(c.Descricao, sp.RefAcaoParaDespublicar) AS Descricao -- Busca nome real do curso
+                        ISNULL(c.Descricao, sp.RefAcaoParaDespublicar) AS Descricao
                     FROM secretariaVirtual.dbo.sv_rotina_publicacoes_web_24h sp
                     INNER JOIN humantrain.dbo.TBForAccoes a ON a.Ref_Accao = sp.RefAcaoParaDespublicar
                     INNER JOIN humantrain.dbo.TBForCursos c ON c.Codigo_Curso = a.Codigo_Curso
@@ -113,129 +115,141 @@ namespace PublicarAcaoWeb
                     AND DATEDIFF(hour, sp.DataQuandoPublicouSubstituta, '{data:yyyy-MM-dd HH:mm:ss}') >= 24
                     ORDER BY sp.DataQuandoPublicouSubstituta;";
 
-                // Executa despublicação de ações pendentes há mais de 24h
-                await Task.Run(() =>
+                DataTable dataTableDespublicacao = new DataTable();
+                try
                 {
-                    DataTable dataTableDespublicacao = new DataTable();
-                    try
+                    Connect.SVlocalConnect.ConnInit();
+                    svConnAberta = true;
+                    using (SqlDataAdapter adapterDespublicacao = new SqlDataAdapter(queryDespublicacao24h, Connect.SVlocalConnect.Conn))
                     {
-                        Connect.SVlocalConnect.ConnInit();
-                        using (SqlDataAdapter adapterDespublicacao = new SqlDataAdapter(queryDespublicacao24h, Connect.SVlocalConnect.Conn))
-                        {
-                            adapterDespublicacao.Fill(dataTableDespublicacao);
-                        }
+                        adapterDespublicacao.Fill(dataTableDespublicacao);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    sendEmail($"Erro na rotina de despublicação após 24h: {ex.Message}", Settings.Default.emailenvio, true, "informatica", "");
+                }
+                finally
+                {
+                    if (svConnAberta)
+                    {
                         Connect.SVlocalConnect.ConnEnd();
+                        svConnAberta = false;
+                    }
+                }
 
-                        // Processa despublicações pendentes
-                        if (dataTableDespublicacao.Rows.Count > 0)
+                if (dataTableDespublicacao.Rows.Count > 0)
+                {
+                    using (var httpClient = new HttpClient())
+                    {
+                        httpClient.Timeout = TimeSpan.FromSeconds(30);
+
+                        foreach (DataRow row in dataTableDespublicacao.Rows)
                         {
-                            using (var httpClient = new HttpClient())
+                            string refAccao = row["RefAcaoParaDespublicar"]?.ToString()?.Trim();
+                            string dataPublicacao = row["DataQuandoPublicouSubstituta"]?.ToString();
+                            string motivo = row["MotivoSubstituicao"]?.ToString()?.Trim();
+                            string descricao = row["Descricao"]?.ToString()?.Trim();
+
+                            try
                             {
-                                httpClient.Timeout = TimeSpan.FromSeconds(30);
+                                string apiUrlDespublicar = $"{API_BASE_URL}/despublicar/{refAccao}";
+                                
+                                var response = httpClient.PostAsync(apiUrlDespublicar, null).GetAwaiter().GetResult();
+                                bool sucessoDespublicacao = response.IsSuccessStatusCode;
+                                string mensagem = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
 
-                                foreach (DataRow row in dataTableDespublicacao.Rows)
+                                try
                                 {
-                                    string refAccao = row["RefAcaoParaDespublicar"]?.ToString()?.Trim();
-                                    string dataPublicacao = row["DataQuandoPublicouSubstituta"]?.ToString();
-                                    string motivo = row["MotivoSubstituicao"]?.ToString()?.Trim();
-                                    string descricao = row["Descricao"]?.ToString()?.Trim();
-
-                                    try
-                                    {
-                                        string apiUrlDespublicar = $"{API_BASE_URL}/despublicar/{refAccao}";
-                                        var response = httpClient.PostAsync(apiUrlDespublicar, null).Result;
-                                        
-                                        bool sucessoDespublicacao = response.IsSuccessStatusCode;
-                                        string mensagem = response.Content.ReadAsStringAsync().Result;
-
-                                        // Marca como despublicada na tabela de controle - usar conexão SV
-                                        Connect.SVlocalConnect.ConnInit();
-                                        string updateQuery = $@"
+                                    Connect.SVlocalConnect.ConnInit();
+                                    svConnAberta = true;
+                                    
+                                    string updateQuery = $@"
                                             UPDATE sv_rotina_publicacoes_web_24h 
                                             SET DataQuandoDespublicouOriginal = '{data:yyyy-MM-dd HH:mm:ss}', 
                                                 StatusDespublicacao = '{(sucessoDespublicacao ? "Sucesso" : "Erro")}',
                                                 MensagemDespublicacao = '{mensagem.Replace("'", "''")}'
                                             WHERE RefAcaoParaDespublicar = '{refAccao}' AND DataQuandoDespublicouOriginal IS NULL";
-                                        
-                                        using (SqlCommand cmdUpdate = new SqlCommand(updateQuery, Connect.SVlocalConnect.Conn))
-                                        {
-                                            cmdUpdate.ExecuteNonQuery();
-                                        }
-                                        Connect.SVlocalConnect.ConnEnd();
 
-                                        if (sucessoDespublicacao)
-                                        {
-                                            // Verifica se já estava despublicada - tratar como "não precisou"
-                                            if (mensagem.ToLower().Contains("já está despublicada") || mensagem.ToLower().Contains("already"))
-                                            {
-                                                listAcoesPublicadas.Add(new RelatorioPublicacao
-                                                {
-                                                    RefAccao = refAccao,
-                                                    Descricao = descricao,
-                                                    Acao = "Não precisou despublicar",
-                                                    Motivo = $"Ação já estava despublicada - Publicada em {dataPublicacao} - Motivo original: {motivo}",
-                                                    PercAceitacao = 0,
-                                                    Sucesso = true,
-                                                    Erro = ""
-                                                });
-                                            }
-                                            else
-                                            {
-                                                listAcoesPublicadas.Add(new RelatorioPublicacao
-                                                {
-                                                    RefAccao = refAccao,
-                                                    Descricao = descricao,
-                                                    Acao = "Despublicada após 24h",
-                                                    Motivo = $"Publicada em {dataPublicacao} - Motivo original: {motivo}",
-                                                    PercAceitacao = 0,
-                                                    Sucesso = true,
-                                                    Erro = ""
-                                                });
-                                            }
-
-                                            RegistraLog(refAccao, $"Ação {refAccao} despublicada automaticamente após 24h - Publicada em {dataPublicacao}", "Despublicação Automática", refAccao);
-                                        }
-                                        else
-                                        {
-                                            listAcoesPublicadas.Add(new RelatorioPublicacao
-                                            {
-                                                RefAccao = refAccao,
-                                                Descricao = descricao,
-                                                Acao = "Erro na despublicação após 24h",
-                                                Motivo = $"Publicada em {dataPublicacao} - Motivo original: {motivo}",
-                                                PercAceitacao = 0,
-                                                Sucesso = false,
-                                                Erro = mensagem
-                                            });
-                                        }
+                                    using (SqlCommand cmdUpdate = new SqlCommand(updateQuery, Connect.SVlocalConnect.Conn))
+                                    {
+                                        cmdUpdate.ExecuteNonQuery();
                                     }
-                                    catch (Exception ex)
+                                }
+                                finally
+                                {
+                                    if (svConnAberta)
+                                    {
+                                        Connect.SVlocalConnect.ConnEnd();
+                                        svConnAberta = false;
+                                    }
+                                }
+
+                                if (sucessoDespublicacao)
+                                {
+                                    if (mensagem.ToLower().Contains("já está despublicada") || mensagem.ToLower().Contains("already"))
                                     {
                                         listAcoesPublicadas.Add(new RelatorioPublicacao
                                         {
                                             RefAccao = refAccao,
                                             Descricao = descricao,
-                                            Acao = "Erro na despublicação após 24h",
-                                            Motivo = $"Publicada em {dataPublicacao} - Motivo original: {motivo}",
+                                            Acao = "Não precisou despublicar",
+                                            Motivo = $"Ação já estava despublicada - Publicada em {dataPublicacao} - Motivo original: {motivo}",
                                             PercAceitacao = 0,
-                                            Sucesso = false,
-                                            Erro = ex.Message
+                                            Sucesso = true,
+                                            Erro = ""
                                         });
                                     }
+                                    else
+                                    {
+                                        listAcoesPublicadas.Add(new RelatorioPublicacao
+                                        {
+                                            RefAccao = refAccao,
+                                            Descricao = descricao,
+                                            Acao = "Despublicada após 24h",
+                                            Motivo = $"Publicada em {dataPublicacao} - Motivo original: {motivo}",
+                                            PercAceitacao = 0,
+                                            Sucesso = true,
+                                            Erro = ""
+                                        });
+                                    }
+
+                                    RegistraLog(refAccao, $"Ação {refAccao} despublicada automaticamente após 24h - Publicada em {dataPublicacao}", "Despublicação Automática", refAccao);
                                 }
+                                else
+                                {
+                                    listAcoesPublicadas.Add(new RelatorioPublicacao
+                                    {
+                                        RefAccao = refAccao,
+                                        Descricao = descricao,
+                                        Acao = "Erro na despublicação após 24h",
+                                        Motivo = $"Publicada em {dataPublicacao} - Motivo original: {motivo}",
+                                        PercAceitacao = 0,
+                                        Sucesso = false,
+                                        Erro = mensagem
+                                    });
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                listAcoesPublicadas.Add(new RelatorioPublicacao
+                                {
+                                    RefAccao = refAccao,
+                                    Descricao = descricao,
+                                    Acao = "Erro na despublicação após 24h",
+                                    Motivo = $"Publicada em {dataPublicacao} - Motivo original: {motivo}",
+                                    PercAceitacao = 0,
+                                    Sucesso = false,
+                                    Erro = ex.Message
+                                });
                             }
                         }
                     }
-                    catch (Exception ex)
-                    {
-                        // Log do erro de despublicação
-                        sendEmail($"Erro na rotina de despublicação após 24h: {ex.Message}", Settings.Default.emailenvio, true, "informatica", "");
-                    }
-                }).ConfigureAwait(false);
+                }
 
                 // Busca as ações que precisam ser processadas
                 string queryAcoes = $@"
-                    DECLARE @data_base DATE = CAST('{dataSql}' AS DATE); -- Data de hoje
+                    DECLARE @data_base DATE = CAST('{dataSql}' AS DATE);
 
                     -- ======================================================================
                     -- Blocos de estados auditados
@@ -452,16 +466,11 @@ namespace PublicarAcaoWeb
                     ORDER BY c.Descricao;";
 
                 DataTable dataTableAcoes = new DataTable();
-
-                await Task.Run(() =>
+                using (SqlDataAdapter adapterAcoes = new SqlDataAdapter(queryAcoes, Connect.HTlocalConnect.Conn))
                 {
-                    using (SqlDataAdapter adapterAcoes = new SqlDataAdapter(queryAcoes, Connect.HTlocalConnect.Conn))
-                    {
-                        adapterAcoes.Fill(dataTableAcoes);
-                    }
-                }).ConfigureAwait(false);
+                    adapterAcoes.Fill(dataTableAcoes);
+                }
 
-                // Converte os dados para objetos
                 acoesParaProcessar = dataTableAcoes.AsEnumerable().Select(row => new AcaoParaPublicacao
                 {
                     CodigoCurso = row.Field<string>("Codigo_Curso")?.Trim(),
@@ -477,8 +486,6 @@ namespace PublicarAcaoWeb
                     ProxEstado = row.Field<string>("Prox_Estado")?.Trim(),
                     ProxPubWeb = row.IsNull("Prox_Pub_Web") ? null : row["Prox_Pub_Web"]?.ToString()
                 }).ToList();
-
-                await Task.Run(() => Connect.HTlocalConnect.ConnEnd()).ConfigureAwait(false);
 
                 // Processa cada ação
                 using (var httpClient = new HttpClient())
@@ -557,20 +564,18 @@ namespace PublicarAcaoWeb
                             continue;
                         }
 
-                        // Chama a API de publicação usando POST request
                         try
                         {
                             bool publicacaoSucesso = false;
                             string mensagemPublicacao = "";
                             string erroGeral = "";
 
-                            // Publica APENAS a próxima ação (não despublica a original)
-                            // A ação original (adiada/caducada) permanece despublicada
                             try
                             {
                                 string apiUrlPublicar = $"{API_BASE_URL}/publicar/{acao.ProxRefAccao}";
-                                var responsePublicar = await httpClient.PostAsync(apiUrlPublicar, null).ConfigureAwait(false);
-                                var responseContentPublicar = await responsePublicar.Content.ReadAsStringAsync().ConfigureAwait(false);
+                                
+                                var responsePublicar = httpClient.PostAsync(apiUrlPublicar, null).GetAwaiter().GetResult();
+                                var responseContentPublicar = responsePublicar.Content.ReadAsStringAsync().GetAwaiter().GetResult();
 
                                 if (responsePublicar.IsSuccessStatusCode)
                                 {
@@ -588,7 +593,6 @@ namespace PublicarAcaoWeb
                                 }
                                 else
                                 {
-                                    // Tenta extrair erro estruturado
                                     try
                                     {
                                         var errorResponse = JsonConvert.DeserializeObject<ErrorResponse>(responseContentPublicar);
@@ -603,7 +607,7 @@ namespace PublicarAcaoWeb
                                     if (mensagemPublicacao.ToLower().Contains("já está publicada") || 
                                         responsePublicar.StatusCode == System.Net.HttpStatusCode.Conflict)
                                     {
-                                        publicacaoSucesso = true; // Tratar como sucesso
+                                        publicacaoSucesso = true;
                                     }
                                     else
                                     {
@@ -647,15 +651,11 @@ namespace PublicarAcaoWeb
                                         mensagemCompleta += $" ({mensagemPublicacao})";
                                     }
 
-                                    // CORREÇÃO: Agenda despublicação da AÇÃO ORIGINAL (não da próxima que foi publicada)
-                                    // Lógica correta: publica próxima ação Y → agenda despublicação da ação original X após 24h
-                                    await Task.Run(() =>
-                                {
                                     try
                                     {
-                                        Connect.SVlocalConnect.ConnInit(); // Usar conexão SV onde está a tabela
-                                        
-                                        // Verifica se a tabela existe, se não existir cria
+                                        Connect.SVlocalConnect.ConnInit();
+                                        svConnAberta = true;
+
                                         string checkTableQuery = @"
                                             IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='sv_rotina_publicacoes_web_24h' AND xtype='U')
                                             BEGIN
@@ -671,31 +671,35 @@ namespace PublicarAcaoWeb
                                                     DataCriacao DATETIME DEFAULT GETDATE()
                                                 );
                                             END";
-                                        
+
                                         using (SqlCommand cmdCheck = new SqlCommand(checkTableQuery, Connect.SVlocalConnect.Conn))
                                         {
                                             cmdCheck.ExecuteNonQuery();
                                         }
 
-                                        // Agenda a despublicação da AÇÃO ORIGINAL (não da próxima)
                                         string insertControlQuery = $@"
                                             INSERT INTO sv_rotina_publicacoes_web_24h 
                                             (RefAcaoParaDespublicar, DataQuandoPublicouSubstituta, MotivoSubstituicao, RefAcaoSubstitutaPublicada) 
                                             VALUES 
                                             ('{acao.RefAccao}', '{data:yyyy-MM-dd HH:mm:ss}', '{acao.Motivo.Replace("'", "''")} - Aceitação {acao.PercAceitacao}% - Próxima ação publicada: {acao.ProxRefAccao}', '{acao.ProxRefAccao}')";
-                                        
+
                                         using (SqlCommand cmdInsert = new SqlCommand(insertControlQuery, Connect.SVlocalConnect.Conn))
                                         {
                                             cmdInsert.ExecuteNonQuery();
                                         }
-                                        Connect.SVlocalConnect.ConnEnd();
                                     }
                                     catch (Exception ex)
                                     {
-                                        // Log do erro de inserção na tabela de controle
                                         sendEmail($"Erro ao registrar publicação na tabela de controle: {ex.Message}", Settings.Default.emailenvio, true, "informatica", "");
                                     }
-                                    }).ConfigureAwait(false);
+                                    finally
+                                    {
+                                        if (svConnAberta)
+                                        {
+                                            Connect.SVlocalConnect.ConnEnd();
+                                            svConnAberta = false;
+                                        }
+                                    }
 
                                     listAcoesPublicadas.Add(new RelatorioPublicacao
                                     {
@@ -708,8 +712,7 @@ namespace PublicarAcaoWeb
                                         Erro = ""
                                     });
 
-                                    // Registra log
-                                    await Task.Run(() => RegistraLog(acao.RefAccao, $"Despublicada ação {acao.RefAccao} e publicada próxima ação {acao.ProxRefAccao} - Aceitação < 50% ({acao.PercAceitacao}%) - Status: {acao.StatusTratamento} - Motivo: {acao.Motivo}", "Publicação Ação", acao.RefAccao)).ConfigureAwait(false);
+                                    RegistraLog(acao.RefAccao, $"Despublicada ação {acao.RefAccao} e publicada próxima ação {acao.ProxRefAccao} - Aceitação < 50% ({acao.PercAceitacao}%) - Status: {acao.StatusTratamento} - Motivo: {acao.Motivo}", "Publicação Ação", acao.RefAccao);
                                 }
                             }
                             else
@@ -740,18 +743,68 @@ namespace PublicarAcaoWeb
                             });
 
                             // Log do erro
-                            await Task.Run(() => sendEmail(ex.ToString(), Settings.Default.emailenvio, true, "informatica", "")).ConfigureAwait(false);
+                            sendEmail(ex.ToString(), Settings.Default.emailenvio, true, "informatica", "");
                         }
                     }
                 }
 
-                // Envia o relatório final
-                await Task.Run(() => sendEmailRelatorio()).ConfigureAwait(false);
+                if (htConnAberta)
+                if (htConnAberta)
+                {
+                    Connect.HTlocalConnect.ConnEnd();
+                    htConnAberta = false;
+                }
+                
+                if (svConnAberta)
+                {
+                    Connect.SVlocalConnect.ConnEnd();
+                    svConnAberta = false;
+                }
+                
+                Connect.closeAll();
+                System.Threading.Thread.Sleep(1000);
+                
+                sendEmailRelatorio();
+                
+                // Aguardar o envio do email completar antes de sair
+                System.Threading.Thread.Sleep(2000);
             }
             catch (Exception ex)
             {
+                // Fechar conexões em caso de erro
+                if (htConnAberta)
+                {
+                    try { Connect.HTlocalConnect.ConnEnd(); } catch { }
+                    htConnAberta = false;
+                }
+                
+                if (svConnAberta)
+                {
+                    try { Connect.SVlocalConnect.ConnEnd(); } catch { }
+                    svConnAberta = false;
+                }
+                
+                Connect.closeAll();
+                System.Threading.Thread.Sleep(1000);
+                
                 // Log do erro principal
-                await Task.Run(() => sendEmail(ex.ToString(), Settings.Default.emailenvio, true, "informatica", "")).ConfigureAwait(false);
+                sendEmail(ex.ToString(), Settings.Default.emailenvio, true, "informatica", "");
+                System.Threading.Thread.Sleep(2000);
+            }
+            finally
+            {
+                // Garantir que tudo foi fechado
+                if (htConnAberta)
+                {
+                    try { Connect.HTlocalConnect.ConnEnd(); } catch { }
+                }
+                
+                if (svConnAberta)
+                {
+                    try { Connect.SVlocalConnect.ConnEnd(); } catch { }
+                }
+                
+                try { Connect.closeAll(); } catch { }
             }
         }
 
@@ -759,6 +812,8 @@ namespace PublicarAcaoWeb
         {
             try
             {
+                Connect.closeAll();
+                
                 NetworkCredential basicCredential = new NetworkCredential(Settings.Default.emailenvio, Settings.Default.passwordemail);
                 using (SmtpClient client = new SmtpClient())
                 {
@@ -785,7 +840,6 @@ namespace PublicarAcaoWeb
 
                         string body = "";
 
-                        // Mostra relatório
                         if (listAcoesPublicadas != null && listAcoesPublicadas.Count > 0)
                         {
                             StringBuilder relatorio = new StringBuilder();
@@ -802,7 +856,6 @@ namespace PublicarAcaoWeb
                             var acoesCanceladas = listAcoesPublicadas.Where(x => x.Acao.Contains("Cancelada")).ToList();
                             var acoesNaoTratadas = listAcoesPublicadas.Where(x => x.Acao.Contains("Não Tratada")).ToList();
                             var acoesOutroMotivo = listAcoesPublicadas.Where(x => x.Acao.Contains("Outro Motivo")).ToList();
-                            
                             var acoesComErro = listAcoesPublicadas.Where(x => !x.Sucesso).ToList();
 
                             // Verifica se houve processamento
@@ -826,12 +879,10 @@ namespace PublicarAcaoWeb
                                     
                                     foreach (var acao in acoesPublicadas)
                                     {
-                                        // Extrai informações da ação para melhor apresentação
                                         string acaoSimplificada = acao.Acao;
                                         if (acao.Acao.Contains("Publicada próxima ação:"))
                                         {
                                             string proximaAcao = acao.Acao.Replace("Publicada próxima ação:", "").Trim();
-                                            // Remove texto entre parênteses se existir
                                             if (proximaAcao.Contains("(")) proximaAcao = proximaAcao.Substring(0, proximaAcao.IndexOf("(")).Trim();
                                             
                                             acaoSimplificada = $"<span style='color: #008000;'>Publicou:</span> {proximaAcao}";
@@ -954,7 +1005,6 @@ namespace PublicarAcaoWeb
                                     relatorio.AppendLine("<b>Ações não tratadas (não processadas):</b><br>");
                                     foreach (var acao in acoesNaoTratadas)
                                     {
-                                        // Aplica cor vermelha para "Não Tratado" e verde para "Já Publicado"
                                         string motivoComCor = acao.Motivo;
                                         if (acao.Motivo.Contains("Não Tratado"))
                                         {
@@ -975,7 +1025,6 @@ namespace PublicarAcaoWeb
                                     relatorio.AppendLine("<b>Outras ações não processadas:</b><br>");
                                     foreach (var acao in acoesOutroMotivo)
                                     {
-                                        // Aplica cor vermelha para "Não Tratado" e verde para "Já Publicado"
                                         string motivoComCor = acao.Motivo;
                                         if (acao.Motivo.Contains("Não Tratado"))
                                         {
@@ -1031,11 +1080,14 @@ namespace PublicarAcaoWeb
         {
             try
             {
+                // Garantir que todas as conexões abertas sejam fechadas antes de enviar email
+                Connect.closeAll();
+                
                 NetworkCredential basicCredential = new NetworkCredential(Settings.Default.emailenvio, Settings.Default.passwordemail);
                 SmtpClient client = new SmtpClient();
                 client.Port = 25;
                 client.Host = "mail.criap.com";
-                client.Timeout = 10000;
+                client.Timeout = 30000; // Aumentar timeout para 30 segundos
                 client.DeliveryMethod = SmtpDeliveryMethod.Network;
                 client.Credentials = basicCredential;
 
@@ -1066,12 +1118,13 @@ namespace PublicarAcaoWeb
                 mm.BodyEncoding = UTF8Encoding.UTF8;
                 mm.IsBodyHtml = true;
                 mm.DeliveryNotificationOptions = DeliveryNotificationOptions.OnFailure;
-                mm.Body = body + "<br> " + temp + (teste ? versao : "");
+                mm.Body = body + "<br> " + temp + (teste ? versao : "") + "<br><br>Timestamp envio: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+                
                 client.Send(mm);
+                Console.WriteLine("E-mail enviado em: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
             }
             catch (Exception)
             {
-                // Tratar exceção se necessário
             }
         }
 
@@ -1080,7 +1133,7 @@ namespace PublicarAcaoWeb
             List<objLogSendersFormador> logSenders = new List<objLogSendersFormador>();
             logSenders.Add(new objLogSendersFormador
             {
-                idFormador = "0", // Usar ID genérico para sistema, pois idFormando é INT
+                idFormador = "0",
                 mensagem = mensagem,
                 menu = menu,
                 refAccao = refAcaoLog
@@ -1092,6 +1145,7 @@ namespace PublicarAcaoWeb
         {
             if (logSenders.Count > 0)
             {
+                bool connAberta = false;
                 string dataFormatada = dataBase.ToString("yyyy-MM-dd HH:mm:ss");
                 string subQuery = "INSERT INTO sv_logs (idFormando, refAcao, dataregisto, registo, menu, username) VALUES ";
                 for (int i = 0; i < logSenders.Count; i++)
@@ -1101,13 +1155,26 @@ namespace PublicarAcaoWeb
                     else subQuery += "('" + logSenders[i].idFormador + "', '" + logSenders[i].refAccao + "', '" + dataFormatada + "', '" + logSenders[i].mensagem + "', '" + logSenders[i].menu + "', 'system_rotina') ";
                 }
 
-                Connect.SVlocalConnect.ConnInit();
-                using (SqlCommand cmd = new SqlCommand(subQuery, Connect.SVlocalConnect.Conn))
+                try
                 {
-                    cmd.ExecuteNonQuery();
+                    Connect.SVlocalConnect.ConnInit();
+                    connAberta = true;
+                    using (SqlCommand cmd = new SqlCommand(subQuery, Connect.SVlocalConnect.Conn))
+                    {
+                        cmd.ExecuteNonQuery();
+                    }
                 }
-                Connect.SVlocalConnect.ConnEnd();
-                Connect.closeAll();
+                catch (Exception ex)
+                {
+                    Console.WriteLine("Erro ao salvar log: " + ex.Message);
+                }
+                finally
+                {
+                    if (connAberta)
+                    {
+                        Connect.SVlocalConnect.ConnEnd();
+                    }
+                }
             }
         }
     }
